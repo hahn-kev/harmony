@@ -3,6 +3,7 @@ using Crdt.Changes;
 using Crdt.Core;
 using Crdt.Entities;
 using Crdt.Helpers;
+using Crdt.Resource;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -16,6 +17,8 @@ internal class CrdtRepository(CrdtDbContext _dbContext, IOptions<CrdtConfig> crd
     {
         return _dbContext.Database.BeginTransactionAsync();
     }
+
+    public bool IsInTransaction => _dbContext.Database.CurrentTransaction is not null;
 
 
     public async Task<bool> HasCommit(Guid commitId)
@@ -243,5 +246,30 @@ internal class CrdtRepository(CrdtDbContext _dbContext, IOptions<CrdtConfig> crd
             .AsNoTracking()
             .Select(c => c.HybridDateTime)
             .FirstOrDefault();
+    }
+
+
+    public async Task AddLocalResource(LocalResource localResource)
+    {
+        _dbContext.Set<LocalResource>().Add(localResource);
+        await _dbContext.SaveChangesAsync();
+    }
+
+    public IAsyncEnumerable<LocalResource> LocalResourcesByIds(IEnumerable<Guid> resourceIds)
+    {
+        return _dbContext.Set<LocalResource>().Where(r => resourceIds.Contains(r.Id)).AsAsyncEnumerable();
+    }
+
+    /// <summary>
+    /// primarily for filtering other queries
+    /// </summary>
+    public IQueryable<Guid> LocalResourceIds()
+    {
+        return _dbContext.Set<LocalResource>().Select(r => r.Id);
+    }
+
+    public async Task<LocalResource?> GetLocalResource(Guid resourceId)
+    {
+        return await _dbContext.Set<LocalResource>().FindAsync(resourceId);
     }
 }
