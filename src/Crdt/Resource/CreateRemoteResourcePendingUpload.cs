@@ -3,23 +3,18 @@ using Crdt.Entities;
 
 namespace Crdt.Resource;
 
-public class CreateRemoteResourcePendingUploadChange: Change<RemoteResource>, IPolyType
+public class CreateRemoteResourcePendingUploadChange: CreateChange<RemoteResource>, IPolyType
 {
     public CreateRemoteResourcePendingUploadChange(Guid resourceId) : base(resourceId)
     {
     }
 
-    public override IObjectBase NewEntity(Commit commit)
+    public override ValueTask<IObjectBase> NewEntity(Commit commit, ChangeContext context)
     {
-        return new RemoteResource
+        return ValueTask.FromResult<IObjectBase>(new RemoteResource
         {
             Id = EntityId
-        };
-    }
-
-    public override ValueTask ApplyChange(RemoteResource entity, ChangeContext context)
-    {
-        return ValueTask.CompletedTask;
+        });
     }
 
     public static string TypeName => "create:pendingUpload";
