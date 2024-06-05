@@ -87,6 +87,7 @@ public class DataModel : ISyncable
         await _crdtRepository.AddCommit(commit);
         await UpdateSnapshots(commit, [commit]);
         if (_autoValidate) await ValidateCommits();
+        if (transaction is not null) await transaction.CommitAsync();
     }
 
     private static ChangeEntity<IChange> ToChangeEntity(IChange change, int index)
