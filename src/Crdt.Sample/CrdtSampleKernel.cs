@@ -27,6 +27,7 @@ public static class CrdtSampleKernel
             config =>
             {
                 config.EnableProjectedTables = enableProjectedTables;
+                config.AddRemoteResourceEntity();
                 config.ChangeTypeListBuilder
                     .Add<NewWordChange>()
                     .Add<NewDefinitionChange>()

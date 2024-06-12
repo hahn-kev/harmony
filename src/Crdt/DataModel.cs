@@ -3,7 +3,9 @@ using Crdt.Changes;
 using Crdt.Core;
 using Crdt.Db;
 using Crdt.Entities;
+using Crdt.Resource;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Crdt;
 
@@ -19,13 +21,16 @@ public class DataModel : ISyncable
     private readonly CrdtRepository _crdtRepository;
     private readonly JsonSerializerOptions _serializerOptions;
     private readonly IHybridDateTimeProvider _timeProvider;
+    private readonly IOptions<CrdtConfig> _crdtConfig;
 
     //constructor must be internal because CrdtRepository is internal
-    internal DataModel(CrdtRepository crdtRepository, JsonSerializerOptions serializerOptions, IHybridDateTimeProvider timeProvider)
+    internal DataModel(CrdtRepository crdtRepository, JsonSerializerOptions serializerOptions, IHybridDateTimeProvider timeProvider,
+        IOptions<CrdtConfig> crdtConfig)
     {
         _crdtRepository = crdtRepository;
         _serializerOptions = serializerOptions;
         _timeProvider = timeProvider;
+        _crdtConfig = crdtConfig;
     }
 
 
@@ -78,12 +83,11 @@ public class DataModel : ISyncable
     private async Task Add(Commit commit)
     {
         if (await _crdtRepository.HasCommit(commit.Id)) return;
-
-        await using var transaction = await _crdtRepository.BeginTransactionAsync();
+        await using var transaction = _crdtRepository.IsInTransaction ? null : await _crdtRepository.BeginTransactionAsync();
         await _crdtRepository.AddCommit(commit);
         await UpdateSnapshots(commit, [commit]);
         if (_autoValidate) await ValidateCommits();
-        await transaction.CommitAsync();
+        if (transaction is not null) await transaction.CommitAsync();
     }
 
     private static ChangeEntity<IChange> ToChangeEntity(IChange change, int index)
@@ -226,5 +230,112 @@ public class DataModel : ISyncable
     public async Task SyncMany(ISyncable[] remotes)
     {
         await SyncHelper.SyncMany(this, remotes, _serializerOptions);
+    }
+
+    private void ValidateResourcesSetup()
+    {
+        if (!_crdtConfig.Value.RemoteResourcesEnabled) throw new RemoteResourceNotEnabledException();
+    }
+
+    public async Task<Guid> AddLocalResource(string resourcePath, Guid clientId, Guid id = default, IResourceService? resourceService = null)
+    {
+        ValidateResourcesSetup();
+        var localResource = new LocalResource
+        {
+            Id = id == default ? Guid.NewGuid() : id,
+            LocalPath = Path.GetFullPath(resourcePath)
+        };
+        if (!localResource.FileExists()) throw new FileNotFoundException(localResource.LocalPath);
+        await using var transaction = await _crdtRepository.BeginTransactionAsync();
+        await _crdtRepository.AddLocalResource(localResource);
+        if (resourceService is not null)
+        {
+            var uploadResult = await resourceService.UploadResource(localResource.LocalPath);
+            await AddChange(clientId, new CreateRemoteResourceChange(localResource.Id, uploadResult.RemoteId));
+        }
+        else
+        {
+            await AddChange(clientId, new CreateRemoteResourcePendingUploadChange(localResource.Id));
+        }
+        await transaction.CommitAsync();
+        return localResource.Id;
+    }
+
+    public async Task<LocalResource[]> ListResourcesPendingUpload()
+    {
+        ValidateResourcesSetup();
+        var remoteResources = await GetLatestObjects<RemoteResource>().Where(r => r.RemoteId == null).ToArrayAsync();
+        var localResource = _crdtRepository.LocalResourcesByIds(remoteResources.Select(r => r.Id));
+        return await localResource.ToArrayAsync();
+    }
+
+    public async Task UploadPendingResources(Guid clientId, IResourceService resourceService)
+    {
+        ValidateResourcesSetup();
+        var pendingUploads = await ListResourcesPendingUpload();
+        var changes = new List<IChange>(pendingUploads.Length);
+        try
+        {
+            foreach (var localResource in pendingUploads)
+            {
+                var uploadResult = await resourceService.UploadResource(localResource.LocalPath);
+                changes.Add(new RemoteResourceUploadedChange(localResource.Id, uploadResult.RemoteId));
+            }
+        }
+        finally
+        {
+            //if upload throws at any point we will at least save the changes that did get made.
+            await AddChanges(clientId, changes);
+        }
+    }
+
+    public async Task UploadPendingResource(Guid resourceId, Guid clientId, IResourceService resourceService)
+    {
+        var localResource = await _crdtRepository.GetLocalResource(resourceId) ??
+                            throw new ArgumentException($"unable to find local resource with id {resourceId}");
+        ValidateResourcesSetup();
+        await UploadPendingResource(localResource, clientId, resourceService);
+    }
+
+    public async Task UploadPendingResource(LocalResource localResource, Guid clientId, IResourceService resourceService)
+    {
+        ValidateResourcesSetup();
+        var uploadResult = await resourceService.UploadResource(localResource.LocalPath);
+        await AddChange(clientId, new RemoteResourceUploadedChange(localResource.Id, uploadResult.RemoteId));
+    }
+
+    public async Task<RemoteResource[]> ListResourcesPendingDownload()
+    {
+        ValidateResourcesSetup();
+        var localResourceIds = _crdtRepository.LocalResourceIds();
+        var remoteResources = await GetLatestObjects<RemoteResource>()
+            .Where(r => r.RemoteId != null && !localResourceIds.Contains(r.Id))
+            .ToArrayAsync();
+        return remoteResources;
+    }
+
+    public async Task<LocalResource> DownloadResource(Guid resourceId, IResourceService resourceService)
+    {
+        ValidateResourcesSetup();
+        return await DownloadResource(await GetLatest<RemoteResource>(resourceId) ?? throw new EntityNotFoundException("Unable to find remote resource"), resourceService);
+    }
+
+    public async Task<LocalResource> DownloadResource(RemoteResource remoteResource, IResourceService resourceService)
+    {
+        ValidateResourcesSetup();
+        ArgumentNullException.ThrowIfNull(remoteResource.RemoteId);
+        var downloadResult = await resourceService.DownloadResource(remoteResource.RemoteId, _crdtConfig.Value.LocalResourceCachePath);
+        var localResource = new LocalResource
+        {
+            Id = remoteResource.Id,
+            LocalPath = downloadResult.LocalPath
+        };
+        await _crdtRepository.AddLocalResource(localResource);
+        return localResource;
+    }
+
+    public async Task<LocalResource?> GetLocalResource(Guid resourceId)
+    {
+        return await _crdtRepository.GetLocalResource(resourceId);
     }
 }
